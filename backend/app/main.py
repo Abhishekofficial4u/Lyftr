@@ -11,8 +11,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 
-from .database import Database
-from .llm_service import LLMService
+try:
+    from .database import Database
+    from .llm_service import LLMService
+except (ImportError, ValueError):
+    try:
+        from app.database import Database
+        from app.llm_service import LLMService
+    except (ImportError, ValueError):
+        from database import Database
+        from llm_service import LLMService
 
 load_dotenv()
 
@@ -35,7 +43,7 @@ llm_service: Optional[LLMService] = None
 async def ensure_initialized():
     """Ensure db and llm_service are initialized (handles serverless environments)."""
     global db, llm_service
-    if db is None:
+    if db is None or db._conn is None:
         db_path = DATABASE_URL.replace("sqlite:///", "")
         db = Database(db_path)
         await db.initialize()

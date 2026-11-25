@@ -95,3 +95,4 @@ class Database:
         """Close the database connection."""
         if self._conn:
             await self._conn.close()
+            self._conn = None
