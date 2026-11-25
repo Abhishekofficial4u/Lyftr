@@ -18,48 +18,56 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# --- Configuration ---
+# Configuration
 LLM_API_KEYS = os.getenv("LLM_API_KEYS", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-2.5-flash")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///app.db")
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
-ENABLE_FAILURE_SIMULATION = os.getenv("ENABLE_FAILURE_SIMULATION", "false").lower() == "true"
+# On Vercel or serverless, default to /tmp/app.db because the root filesystem is read-only
+DATABASE_URL = os.getenv("DATABASE_URL", "/tmp/app.db" if os.getenv("VERCEL") else "sqlite:///app.db")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
+ENABLE_FAILURE_SIMULATION = os.getenv("ENABLE_FAILURE_SIMULATION", "true").lower() == "true"
 DEFAULT_SYSTEM_PROMPT = os.getenv("DEFAULT_SYSTEM_PROMPT", "You are a helpful AI assistant.")
 
-# --- Global instances ---
-db: Database = None  # type: ignore
-llm_service: LLMService = None  # type: ignore
+# Global instances
+db: Optional[Database] = None
+llm_service: Optional[LLMService] = None
+
+
+async def ensure_initialized():
+    """Ensure db and llm_service are initialized (handles serverless environments)."""
+    global db, llm_service
+    if db is None:
+        db_path = DATABASE_URL.replace("sqlite:///", "")
+        db = Database(db_path)
+        await db.initialize()
+    if llm_service is None:
+        keys = [k.strip() for k in LLM_API_KEYS.split(",") if k.strip()]
+        llm_service = LLMService(
+            api_keys=keys,
+            model=LLM_MODEL,
+            enable_cache=True,
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db, llm_service
-
-    # Parse API keys
-    keys = [k.strip() for k in LLM_API_KEYS.split(",") if k.strip()]
-    if not keys:
-        logger.warning("No LLM_API_KEYS configured. The app will not be able to make LLM calls.")
-
-    # Initialize database
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    db = Database(db_path)
-    await db.initialize()
-
-    # Initialize LLM service
-    llm_service = LLMService(
-        api_keys=keys,
-        model=LLM_MODEL,
-        enable_cache=True,
-    )
-
-    logger.info(f"App started: {len(keys)} keys, model={LLM_MODEL}, cache=enabled")
+    await ensure_initialized()
+    logger.info(f"App started: {len(llm_service.api_keys)} keys, model={LLM_MODEL}, cache=enabled")
     yield
-
-    # Cleanup
-    await db.close()
+    if db:
+        await db.close()
 
 
 app = FastAPI(title="LLM Chatbot API", lifespan=lifespan)
+
+# Root endpoint for browser visits
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "service": "Lyftr LLM Chatbot Backend",
+        "health": "/health",
+        "docs": "/docs"
+    }
 
 # CORS
 origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
@@ -125,6 +133,7 @@ class SessionMessagesResponse(BaseModel):
 # --- Endpoints ---
 @app.get("/health", response_model=HealthResponse)
 async def health():
+    await ensure_initialized()
     # Check database is reachable
     try:
         await db.health_check()
@@ -140,6 +149,7 @@ async def health():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, raw_request: Request):
+    await ensure_initialized()
     start_time = time.time()
 
     # Parse failure simulation header
@@ -198,6 +208,7 @@ async def chat(request: ChatRequest, raw_request: Request):
 
 @app.get("/sessions/{session_id}/messages", response_model=SessionMessagesResponse)
 async def get_session_messages(session_id: str):
+    await ensure_initialized()
     messages = await db.get_messages(session_id)
     if not messages:
         raise HTTPException(status_code=404, detail="session not found")
