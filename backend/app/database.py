@@ -15,9 +15,18 @@ class Database:
         # Ensure the directory exists
         db_dir = os.path.dirname(self.db_path)
         if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
+            try:
+                os.makedirs(db_dir, exist_ok=True)
+            except OSError:
+                pass
 
-        self._conn = await aiosqlite.connect(self.db_path)
+        try:
+            self._conn = await aiosqlite.connect(self.db_path)
+        except Exception:
+            # Fallback to /tmp if current dir is read-only (e.g. serverless)
+            fallback = "/tmp/app.db"
+            os.makedirs("/tmp", exist_ok=True)
+            self._conn = await aiosqlite.connect(fallback)
         self._conn.row_factory = aiosqlite.Row
 
         await self._conn.execute("""
